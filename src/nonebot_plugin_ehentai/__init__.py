@@ -7,12 +7,27 @@ from math import ceil
 from pathlib import Path
 from uuid import uuid4
 
-from nonebot import get_plugin_config, logger, on_command, get_driver
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageEvent, MessageSegment
-from nonebot.adapters.onebot.v11.exception import ActionFailed
+from nonebot import get_plugin_config, logger, on_command, get_driver, require
+from nonebot.adapters.onebot.v11 import (
+    Bot, 
+    GroupMessageEvent, 
+    Message, 
+    MessageEvent, 
+    MessageSegment, 
+    ActionFailed
+)
 from nonebot.exception import FinishedException
 from nonebot.params import CommandArg
 from nonebot.plugin import PluginMetadata
+
+# 引入定时任务支持
+try:
+    require("nonebot_plugin_apscheduler")
+    from nonebot_plugin_apscheduler import scheduler
+    HAS_SCHEDULER = True
+except Exception:
+    HAS_SCHEDULER = False
+    logger.warning("[定时清理] 未发现 nonebot_plugin_apscheduler，自动清理功能将不可用")
 
 from .config import Config
 from .service import EHentaiClient, SearchOptions
@@ -531,19 +546,18 @@ async def handle_download(
                 # 标题安全清洗
                 safe_title = gallery.title.encode("utf-8", errors="ignore").decode("utf-8")
                 
-                # 1. 下载封面到本地再发送，防止 Forbidden 错误
+                # 1. 准备封面 (下载到本地)
+                cover_segment = None
                 if gallery.cover_url:
                     cover_path = download_dir / "covers" / f"{gallery.gid}_cover.jpg"
                     cover_path.parent.mkdir(parents=True, exist_ok=True)
                     try:
-                        logger.info(f"[下载处理] 正在将封面下载到本地: {gallery.cover_url}")
                         await client.download_file(gallery.cover_url, cover_path)
-                        await download_cmd.send(MessageSegment.image(cover_path))
-                        # 发送完后可以根据需要删除或保留。这里保留作为缓存，重复下载时更快。
+                        cover_segment = MessageSegment.image(cover_path)
                     except Exception as e:
-                        logger.warning(f"[下载处理] 本地封面处理失败: {safe_exception_text(e)}")
-                
-                # 2. 发送核心文本并结束
+                        logger.warning(f"[下载处理] 封面处理失败: {safe_exception_text(e)}")
+
+                # 2. 准备文本
                 text_info = (
                     f"你请求的资源：\n{safe_title}\n\n"
                     f"下载链接：\n{r2_url}\n\n"
@@ -551,13 +565,38 @@ async def handle_download(
                     f"R2 用量：{stats.get('total_size_mb', 0):.1f}/{stats.get('max_size_mb', 0):.0f} MB "
                     f"({stats.get('usage_percent', 0):.1f}%)"
                 )
+
+                # 3. 根据配置发送消息
+                msg_type = plugin_config.ehentai_download_message_type
                 
-                await download_cmd.finish(text_info)
+                if msg_type == "forward":
+                    # 合并转发模式
+                    nodes = []
+                    # 节点 1: 封面
+                    if cover_segment:
+                        nodes.append({"type": "node", "data": {"name": "EhBot", "uin": bot.self_id, "content": Message(cover_segment)}})
+                    # 节点 2: 下载信息
+                    nodes.append({"type": "node", "data": {"name": "EhBot", "uin": bot.self_id, "content": Message(text_info)}})
+                    
+                    try:
+                        await bot.call_api("send_group_forward_msg", group_id=event.group_id, messages=nodes)
+                        await download_cmd.finish()
+                    except ActionFailed as e:
+                        logger.warning(f"[下载处理] 转发消息失败: {e}，降级为单气泡发送")
+                        msg_type = "single_bubble"
+
+                if msg_type == "single_bubble":
+                    # 单气泡图文模式
+                    final_msg = Message()
+                    if cover_segment:
+                        final_msg.append(cover_segment)
+                    final_msg.append(MessageSegment.text("\n" + text_info))
+                    await download_cmd.finish(final_msg)
+                
                 return
             else:
                 logger.error(f"[下载处理] R2 上传失败")
         except Exception as r2_error:
-            # 正确放过 NoneBot 流程控制异常
             if isinstance(r2_error, FinishedException):
                 raise r2_error
             logger.error(
@@ -583,3 +622,48 @@ async def handle_download(
         logger.error(f"[下载处理] 无法通知用户")
         pass
     return
+
+
+# --- 定时清理任务 ---
+async def cleanup_task():
+    """执行本地缓存和云端元数据的每日清理"""
+    logger.info("[定时清理] 开始执行每日例行清理任务...")
+    
+    # 1. 清理本地缓存
+    download_dir = Path(plugin_config.ehentai_download_dir)
+    count = 0
+    # 清理 ZIP
+    for zip_file in download_dir.glob("*.zip"):
+        try:
+            zip_file.unlink()
+            count += 1
+        except Exception: pass
+    # 清理封面
+    for cover in (download_dir / "covers").glob("*.jpg"):
+        try:
+            cover.unlink()
+            count += 1
+        except Exception: pass
+    logger.info(f"[定时清理] 已删除 {count} 个本地缓存文件")
+
+    # 2. 清理 D1 过期元数据
+    d1_manager = get_d1_manager()
+    if d1_manager:
+        await d1_manager.cleanup_expired_metadata()
+        logger.info("[定时清理] 已同步清理 D1 过期元数据")
+
+    # 3. R2 的物理清理已由 R2Manager 在上传新文件时自动处理
+
+if HAS_SCHEDULER and plugin_config.ehentai_auto_cleanup_local:
+    try:
+        hour, minute = plugin_config.ehentai_auto_cleanup_time.split(":")
+        scheduler.add_job(
+            cleanup_task, 
+            "cron", 
+            hour=int(hour), 
+            minute=int(minute), 
+            id="ehentai_cleanup"
+        )
+        logger.info(f"[定时清理] 任务已注册，每天 {plugin_config.ehentai_auto_cleanup_time} 运行")
+    except Exception as e:
+        logger.error(f"[定时清理] 任务注册失败: {e}")

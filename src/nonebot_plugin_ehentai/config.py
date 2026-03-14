@@ -56,6 +56,11 @@ class Config(BaseModel):
     ehentai_d1_api_token: str = "" # 需要有 D1 编辑权限的令牌
     ehentai_d1_enabled: bool = False
 
+    # 消息展现与清理配置
+    ehentai_download_message_type: str = "single_bubble" # "single_bubble" 或 "forward"
+    ehentai_auto_cleanup_local: bool = True # 是否启用每日凌晨自动清理本地缓存
+    ehentai_auto_cleanup_time: str = "03:00" # 定时清理的具体时间（24小时制）
+
     @field_validator(
         "ehentai_cookie",
         "ehentai_ipb_member_id",
