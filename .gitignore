@@ -176,3 +176,6 @@ pyrightconfig.json
 !.vscode/*.code-snippets
 
 Ehviewer/
+test_r2_config.py
+.gitignore
+test_search_standalone.py

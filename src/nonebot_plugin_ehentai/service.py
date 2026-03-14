@@ -40,11 +40,13 @@ CHROME_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 
 
 @dataclass
+@dataclass
 class GalleryResult:
     title: str
     url: str
     gid: str
     token: str
+    cover_url: str = ""
 
 
 @dataclass
@@ -88,6 +90,7 @@ class EHentaiClient:
         desktop_site: bool = False,
         impersonate: str = "chrome124",
         enable_direct_ip: bool = True,
+        curl_cffi_skip_on_error: bool = True,
     ) -> None:
         self.site = site.lower()
         self.base_url = self._resolve_base_url(site, base_url)
@@ -109,6 +112,7 @@ class EHentaiClient:
         self.desktop_site = desktop_site
         self.impersonate = impersonate
         self.enable_direct_ip = enable_direct_ip
+        self.curl_cffi_skip_on_error = curl_cffi_skip_on_error
 
     @staticmethod
     def _resolve_base_url(site: str, base_url: str) -> str:
@@ -356,52 +360,131 @@ class EHentaiClient:
 
         return f"{self.base_url}/?{urlencode(params)}"
 
+    @staticmethod
+    def _clean_title(title: str) -> str:
+        """清理标题中的 f: 标签"""
+        import re
+        # 移除所有 f:xxx 标签
+        cleaned = re.sub(r'\s*f:\S+', '', title)
+        # 移除多个连续空格
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        return cleaned.strip()
+
     def _parse_search_results(self, body: str, limit: int) -> list[GalleryResult]:
         soup = BeautifulSoup(body, "html.parser")
+        
+        # 检查是否是搜索警告页面
         if soup.select_one(".searchwarn") is not None:
+            logger.warning(f"[搜索解析] 搜索页面返回警告信息 (可能无权限访问或搜索限制)")
             return []
 
-        anchors = soup.select("table.itg .glname a[href], table.itg a.glink[href]")
+        # EhViewer 同款：先取 .itg 容器，再兼容 table/div 两种布局
+        itg = soup.select_one(".itg")
+        if itg is None:
+            logger.warning("[搜索解析] 未找到 .itg 容器")
+            return []
+
+        if itg.name and itg.name.lower() == "table":
+            nodes = itg.select("tr")
+            # 跳过表头
+            nodes = nodes[1:] if len(nodes) > 1 else []
+            logger.debug(f"[搜索解析] itg=table, 候选行数={len(nodes)}")
+        else:
+            nodes = [child for child in itg.find_all(recursive=False) if getattr(child, "name", None)]
+            logger.debug(f"[搜索解析] itg={itg.name}, 候选块数={len(nodes)}")
 
         results: list[GalleryResult] = []
         seen: set[str] = set()
-        for anchor in anchors:
-            href_raw = anchor.get("href", "").strip()
-            title = anchor.get_text(" ", strip=True)
+        
+        for idx, row in enumerate(nodes, 1):
+            # 先按 EhViewer 的 glname->a 取详情链接
+            glname = row.select_one(".glname")
+            title_anchor = glname.select_one("a[href]") if glname else None
+
+            # 备用：直接找可能的详情链接
+            if not title_anchor:
+                title_anchor = row.select_one("a[href*='/g/'], a[href*='/mpv/']")
+
+            # 再兜底：从所有 a 中扫描 /g/<gid>/<token>
+            if not title_anchor:
+                for link in row.find_all("a", href=True):
+                    href = link.get("href", "").strip()
+                    if href and re.search(r"/(?:g|mpv)/\d+/[0-9a-f]{10}", href):
+                        title_anchor = link
+                        break
+
+            if not title_anchor:
+                logger.debug(f"[搜索解析] 第 {idx} 行: 未找到标题链接")
+                continue
+            
+            href_raw = title_anchor.get("href", "").strip()
+            title_node = row.select_one(".glink")
+            title = title_node.get_text(" ", strip=True) if title_node else title_anchor.get_text(" ", strip=True)
+            
             if not href_raw or not title:
+                logger.debug(f"[搜索解析] 第 {idx} 行: 标题或链接为空 (href={bool(href_raw)}, title={bool(title)})")
                 continue
 
+            # 清理标题中的 f: 标签
+            title = self._clean_title(title)
+            
             href = self._normalize_gallery_url(href_raw)
             gid_token = self._extract_gid_token(href)
             if not gid_token:
+                logger.debug(f"[搜索解析] 第 {idx} 行: 无法提取 gid/token (href={href})")
                 continue
 
             gid, token = gid_token
             dedupe_key = f"{gid}:{token}"
             if dedupe_key in seen:
+                logger.debug(f"[搜索解析] 第 {idx} 行: 重复的 {dedupe_key}")
                 continue
 
+            # 获取封面图片 URL
+            img = row.select_one("img[data-src], img[src]")
+            cover_url = ""
+            if img:
+                cover_url = (img.get("data-src") or img.get("src") or "").strip()
+                if cover_url.startswith("data:image"):
+                    cover_url = ""
+            
             seen.add(dedupe_key)
-            results.append(GalleryResult(title=title, url=href, gid=gid, token=token))
+            result = GalleryResult(title=title, url=href, gid=gid, token=token, cover_url=cover_url)
+            results.append(result)
+            logger.debug(f"[搜索解析] 第 {idx} 行: ✓ 解析成功 - {title[:30]}")
             if len(results) >= limit:
                 break
 
+        logger.info(f"[搜索解析] 共解析 {len(results)} 个结果")
         return results
 
     def _search_from_response(self, resp, limit: int) -> list[GalleryResult]:
         body = resp.text
-        if getattr(resp, "status_code", None) not in (200, 451):
+        status_code = getattr(resp, "status_code", None)
+        
+        if status_code not in (200, 451):
+            logger.error(f"[搜索响应] 非预期状态码: {status_code}")
             self._raise_for_response(resp)
 
+        logger.debug(f"[搜索响应] 响应状态码: {status_code}, 响应体大小: {len(body)} 字节")
+        
+        # 兼容 table/div 结构，只检查是否存在 .itg 容器
+        if "class=\"itg" not in body and "class='itg" not in body:
+            logger.warning(f"[搜索响应] 响应体中未找到 .itg 容器")
+        
         results = self._parse_search_results(body, limit)
+        
         if results:
+            logger.info(f"[搜索响应] 根据响应解析出 {len(results)} 个结果")
             return results
 
-        if getattr(resp, "status_code", None) == 451:
+        if status_code == 451:
+            logger.error(f"[搜索响应] HTTP 451 且无结果，权限不足或 IP 被限制")
             raise RuntimeError(
                 "搜索页返回 451，且正文中未解析出图集列表。请配置 EHENTAI_PROXY，或切换到可访问 E-Hentai 的网络环境。"
             )
 
+        logger.warning(f"[搜索响应] 未解析出任何搜索结果")
         return results
 
     def _search_sync(
@@ -430,21 +513,27 @@ class EHentaiClient:
         self, keyword: str, limit: int = 5, options: Optional[SearchOptions] = None
     ) -> list[GalleryResult]:
         logger.info(f"[搜索] 开始搜索: keyword='{keyword}', limit={limit}, backend={self.backend}")
+        
+        # 如果配置了搜索失败立即降级，或者后端是 curl_cffi，尝试 curl_cffi
+        # 但如果失败则立即转向 httpx
         if self.backend == "curl_cffi":
             try:
                 logger.debug(f"[搜索] 使用 curl_cffi 后端搜索")
                 return await asyncio.to_thread(self._search_sync, keyword, limit, options)
             except Exception as error:
                 logger.warning(f"[搜索] curl_cffi 搜索出错: {type(error).__name__}: {error}")
-                if self.http3 and self._is_quic_tls_error(error):
-                    logger.info(f"[搜索] 检测到 QUIC/TLS 错误，自动降级到 HTTP/1.1")
-                    return await asyncio.to_thread(
-                        self._search_sync, keyword, limit, options, False
-                    )
-                if not self._should_fallback_to_httpx(error):
-                    logger.error(f"[搜索] 错误不可恢复，抛出异常")
-                    raise
-                logger.info(f"[搜索] 将使用 httpx 后端作为备选")
+                if self.curl_cffi_skip_on_error:
+                    logger.info("[搜索] 配置为 curl_cffi 失败即降级，切换 httpx 继续")
+                else:
+                    if self.http3 and self._is_quic_tls_error(error):
+                        logger.info(f"[搜索] 检测到 QUIC/TLS 错误，自动降级到 HTTP/1.1")
+                        return await asyncio.to_thread(
+                            self._search_sync, keyword, limit, options, False
+                        )
+                    if not self._should_fallback_to_httpx(error):
+                        logger.error(f"[搜索] 错误不可恢复，抛出异常")
+                        raise
+                    logger.info(f"[搜索] 将使用 httpx 后端作为备选")
 
         search_url = self._build_search_url(keyword, options)
         logger.debug(f"[搜索] 构建的搜索 URL: {search_url}")
@@ -515,6 +604,30 @@ class EHentaiClient:
             logger.error(f"[存档] 需要登录 Cookie 才能访问")
             raise RuntimeError("下载归档需要已登录的 E-Hentai/ExHentai Cookie")
         return resp.text
+
+    def _select_archive_option(self, options: list[ArchiveOption], prefer_original: bool = False) -> ArchiveOption:
+        """
+        选择最优的存档选项
+        prefer_original=False: 优先选择 resample（小文件）
+        prefer_original=True: 优先选择 original（高质量）
+        """
+        if prefer_original:
+            # 优先原始质量
+            preferred = next(
+                (item for item in options if not item.is_hath and item.res == "org"),
+                None,
+            )
+            if preferred is None:
+                preferred = next((item for item in options if not item.is_hath), options[0])
+        else:
+            # 默认选择 resample（小文件）
+            preferred = next(
+                (item for item in options if not item.is_hath and item.res == "resample"),
+                None,
+            )
+            if preferred is None:
+                preferred = next((item for item in options if not item.is_hath), options[0])
+        return preferred
 
     def _parse_archive_options(self, body: str) -> list[ArchiveOption]:
         soup = BeautifulSoup(body, "html.parser")
@@ -700,8 +813,8 @@ class EHentaiClient:
             result = await do_post()
         return result
 
-    async def resolve_archive_url(self, gallery_url: str) -> Optional[str]:
-        logger.info(f"[存档] 开始解析存档下载链接: {gallery_url}")
+    async def resolve_archive_url(self, gallery_url: str, prefer_original: bool = False) -> Optional[str]:
+        logger.info(f"[存档] 开始解析存档下载链接: {gallery_url}, prefer_original={prefer_original}")
         if self.backend == "curl_cffi":
             try:
                 logger.debug(f"[存档] 使用 curl_cffi 后端解析")
@@ -745,13 +858,8 @@ class EHentaiClient:
                         logger.warning(f"[存档] 未找到可用的存档选项")
                         return None
 
-                    preferred = next(
-                        (item for item in options if not item.is_hath and item.res == "org"),
-                        None,
-                    )
-                    if preferred is None:
-                        preferred = next((item for item in options if not item.is_hath), options[0])
-                    logger.debug(f"[存档] 选择存档: {preferred.res}")
+                    preferred = self._select_archive_option(options, prefer_original)
+                    logger.debug(f"[存档] 选择存档: {preferred.res} (prefer_original={prefer_original})")
                     url = await self._request_archive_download_url(client, gid, token, preferred)
                     logger.info(f"[存档] 成功获取下载链接 (直连 IP)")
                     return url
@@ -781,13 +889,8 @@ class EHentaiClient:
                                 logger.warning(f"[存档] 未找到可用的存档选项")
                                 return None
 
-                            preferred = next(
-                                (item for item in options if not item.is_hath and item.res == "org"),
-                                None,
-                            )
-                            if preferred is None:
-                                preferred = next((item for item in options if not item.is_hath), options[0])
-                            logger.debug(f"[存档] 选择存档: {preferred.res}")
+                            preferred = self._select_archive_option(options, prefer_original)
+                            logger.debug(f"[存档] 选择存档: {preferred.res} (prefer_original={prefer_original})")
                             url = await self._request_archive_download_url(client, gid, token, preferred)
                             logger.info(f"[存档] 成功获取下载链接 (标准 DNS)")
                             return url
@@ -816,13 +919,8 @@ class EHentaiClient:
                 logger.warning(f"[存档] 未找到可用的存档选项")
                 return None
 
-            preferred = next(
-                (item for item in options if not item.is_hath and item.res == "org"),
-                None,
-            )
-            if preferred is None:
-                preferred = next((item for item in options if not item.is_hath), options[0])
-            logger.debug(f"[存档] 选择存档: {preferred.res}")
+            preferred = self._select_archive_option(options, prefer_original)
+            logger.debug(f"[存档] 选择存档: {preferred.res} (prefer_original={prefer_original})")
             url = await self._request_archive_download_url(client, gid, token, preferred)
             logger.info(f"[存档] 成功获取下载链接 (标准 DNS)")
             return url

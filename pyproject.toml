@@ -12,6 +12,9 @@ dependencies = [
     "beautifulsoup4>=4.12.0",
 ]
 
+[project.optional-dependencies]
+r2 = ["boto3>=1.26"]
+
 [project.urls]
 Homepage = "https://github.com/yourname/nonebot-plugin-ehentai"
 

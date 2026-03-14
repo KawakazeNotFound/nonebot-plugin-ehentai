@@ -36,10 +36,11 @@ EHENTAI_TIMEOUT=20
 EHENTAI_MAX_RESULTS=5
 EHENTAI_DOWNLOAD_DIR=data/ehentai
 EHENTAI_PROXY=
-EHENTAI_HTTP_BACKEND=curl_cffi
+EHENTAI_HTTP_BACKEND=httpx
 EHENTAI_HTTP3=true
 EHENTAI_DESKTOP_SITE=false
 EHENTAI_IMPERSONATE=chrome124
+EHENTAI_CURL_CFFI_SKIP_ON_ERROR=true
 EHENTAI_STREAM_UPLOAD_FIRST=true
 EHENTAI_STREAM_CHUNK_SIZE=262144
 EHENTAI_STREAM_FILE_RETENTION_MS=300000
@@ -53,6 +54,16 @@ EHENTAI_SEARCH_F_SFT=false
 EHENTAI_SEARCH_F_SRDD=0
 EHENTAI_SEARCH_F_SPF=0
 EHENTAI_SEARCH_F_SPT=0
+
+# Cloudflare R2 备用上传配置（可选）
+EHENTAI_R2_ACCESS_KEY_ID=
+EHENTAI_R2_SECRET_ACCESS_KEY=
+EHENTAI_R2_BUCKET_NAME=ehentai
+EHENTAI_R2_ENDPOINT=https://xxx.r2.cloudflarestorage.com
+EHENTAI_R2_PUBLIC_DOMAIN=https://pub-xxx.r2.dev
+EHENTAI_R2_MAX_TOTAL_SIZE_MB=3072
+EHENTAI_R2_FILE_RETENTION_HOURS=24
+EHENTAI_R2_ENABLED=false
 ```
 
 ### 配置说明
@@ -72,6 +83,7 @@ EHENTAI_SEARCH_F_SPT=0
 - `EHENTAI_HTTP3`：在 `curl_cffi` 后端下是否优先使用 HTTP/3
 - `EHENTAI_DESKTOP_SITE`：是否使用桌面站风格 UA；默认关闭，更接近 EhViewer 绕 Cloudflare 时的移动站策略
 - `EHENTAI_IMPERSONATE`：`curl_cffi` 浏览器指纹，例如 `chrome124`
+- `EHENTAI_CURL_CFFI_SKIP_ON_ERROR`：当 `curl_cffi` 搜索失败时是否立即降级到 `httpx`（建议 `true`）
 - `EHENTAI_STREAM_UPLOAD_FIRST`：是否优先使用 `upload_file_stream`（推荐开启）
 - `EHENTAI_STREAM_CHUNK_SIZE`：流式上传分片大小（字节）
 - `EHENTAI_STREAM_FILE_RETENTION_MS`：流式上传后 NapCat 临时文件保留时长（毫秒）
@@ -86,16 +98,44 @@ EHENTAI_SEARCH_F_SPT=0
 - `EHENTAI_SEARCH_F_SPF`：页数下限（`f_spf`，>0 生效）
 - `EHENTAI_SEARCH_F_SPT`：页数上限（`f_spt`，>0 生效）
 
+### Cloudflare R2 备用上传配置
+
+当群文件上传失败时，可以自动备用上传到 Cloudflare R2 CDN。
+
+- `EHENTAI_R2_ACCESS_KEY_ID`：R2 S3 API Token (Access Key ID)
+- `EHENTAI_R2_SECRET_ACCESS_KEY`：R2 S3 API Token (Secret Access Key)
+- `EHENTAI_R2_BUCKET_NAME`：R2 Bucket 名称，默认 `ehentai`
+- `EHENTAI_R2_ENDPOINT`：R2 终结点 URL（例如 `https://REDACTED.r2.cloudflarestorage.com`）
+- `EHENTAI_R2_PUBLIC_DOMAIN`：R2 公开访问域名（例如 `https://pub-xxx.r2.dev`）
+- `EHENTAI_R2_MAX_TOTAL_SIZE_MB`：R2 最大存储限制，默认 3072 MB（3 GB）
+- `EHENTAI_R2_FILE_RETENTION_HOURS`：文件保留时间，默认 24 小时（过期自动删除）
+- `EHENTAI_R2_ENABLED`：是否启用 R2 备用上传，默认关闭
+
+**使用说明：**
+1. 在 Cloudflare R2 中创建 S3 API Token（不是通用 API Token）
+2. 从 S3 API Token 中获取 Access Key ID 和 Secret Access Key
+3. 填写 `ACCESS_KEY_ID`、`SECRET_ACCESS_KEY`、`ENDPOINT` 和公开域名
+4. 当群文件上传失败时，自动上传到 R2 并返回公开下载链接
+5. 链接在 24 小时后自动过期（可配置）
+6. 存储空间满时自动删除最早的文件
+
 ## 指令
 
-- `/search [Name]`：搜索并返回若干条结果（标题 + 链接）
-- `/download [Name]`：
+- `/search [Name]`：搜索并返回第一条结果（带封面图片和链接）
+- `/download [-original] [Name]`：
   1. 按关键词搜索
   2. 取第一条结果
   3. 解析归档下载链接并下载 zip
+     - 不带 `-original`：下载 Resample 版本（推荐，文件较小）
+     - 带 `-original`：下载 Original 版本（原始质量，文件较大）
   4. 优先调用 `upload_file_stream` 上传到 NapCat 侧临时文件
   5. 再调用 `upload_group_file` 上传到当前群
-  6. 若 stream 接口失败，自动回退到本地路径直传 `upload_group_file`
+  6. 若群文件上传失败且已配置 R2：自动上传到 R2 并返回公开链接
+  7. 若 stream 接口失败，自动回退到本地路径直传 `upload_group_file`
+
+**示例：**
+- `/download 标题`：下载 Resample 版本
+- `/download -original 标题`：下载原始质量版本
 
 ## NapCat 说明
 

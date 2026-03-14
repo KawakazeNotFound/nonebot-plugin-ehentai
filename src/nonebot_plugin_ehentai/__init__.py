@@ -7,14 +7,15 @@ from math import ceil
 from pathlib import Path
 from uuid import uuid4
 
-from nonebot import get_plugin_config, logger, on_command
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageEvent
+from nonebot import get_plugin_config, logger, on_command, get_driver
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageEvent, MessageSegment
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.params import CommandArg
 from nonebot.plugin import PluginMetadata
 
 from .config import Config
 from .service import EHentaiClient, SearchOptions
+from .r2 import init_r2_manager, get_r2_manager
 
 __plugin_meta__ = PluginMetadata(
     name="nonebot-plugin-ehentai",
@@ -26,6 +27,14 @@ __plugin_meta__ = PluginMetadata(
 )
 
 plugin_config = get_plugin_config(Config)
+
+# 初始化 R2 管理器
+driver = get_driver()
+
+@driver.on_startup
+async def _init_r2():
+    """插件启动时初始化 R2 管理器"""
+    await init_r2_manager(plugin_config)
 
 
 def build_client() -> EHentaiClient:
@@ -45,6 +54,7 @@ def build_client() -> EHentaiClient:
         desktop_site=plugin_config.ehentai_desktop_site,
         impersonate=plugin_config.ehentai_impersonate,
         enable_direct_ip=plugin_config.ehentai_enable_direct_ip,
+        curl_cffi_skip_on_error=plugin_config.ehentai_curl_cffi_skip_on_error,
     )
 
 
@@ -159,30 +169,50 @@ async def handle_search(args: Message = CommandArg()) -> None:
     if not results:
         await search_cmd.finish("没有找到结果，或当前 Cookie 权限不足。")
 
-    # 构建结果消息（仅包含标题和链接）
-    lines = []
-    for item in results:
-        lines.append(item.title)
-        lines.append(item.url)
-        lines.append("")  # 空行分隔
+    # 只取第一个结果
+    gallery = results[0]
+    logger.info(f"[搜索处理] 返回第一个结果: {gallery.title}")
 
-    # 使用带重试的发送函数
-    await send_message_with_retry(search_cmd, "\n".join(lines).strip())
+    # 构建消息：标题 + URL
+    message_text = f"{gallery.title}\n{gallery.url}"
+
+    # 如果有封面，构建带图片的消息
+    if gallery.cover_url:
+        logger.debug(f"[搜索处理] 封面 URL: {gallery.cover_url}")
+        try:
+            # 构建消息：图片 + 标题 + URL
+            msg = Message()
+            msg.append(MessageSegment.image(gallery.cover_url))
+            msg.append(MessageSegment.text(f"\n{message_text}"))
+            await search_cmd.finish(msg)
+        except Exception as e:
+            logger.warning(f"[搜索处理] 发送图片失败: {e}，降级为文本消息")
+            await search_cmd.finish(message_text)
+    else:
+        # 没有封面，只发送文本
+        await search_cmd.finish(message_text)
 
 
 async def upload_to_group_file(bot: Bot, group_id: int, file_path: Path) -> None:
     logger.info(f"[上传] 开始上传群文件: group_id={group_id}, file={file_path.name}, size={file_path.stat().st_size / 1024 / 1024:.2f} MB")
-    try:
-        await bot.call_api(
-            "upload_group_file",
-            group_id=group_id,
-            file=str(file_path.resolve()),
-            name=file_path.name,
-        )
-        logger.info(f"[上传] 群文件上传成功")
-    except Exception as error:
-        logger.error(f"[上传] 群文件上传失败: {type(error).__name__}: {error}", exc_info=True)
-        raise
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            await bot.call_api(
+                "upload_group_file",
+                group_id=group_id,
+                file=str(file_path.resolve()),
+                name=file_path.name,
+            )
+            logger.info(f"[上传] 群文件上传成功")
+            return
+        except Exception as error:
+            if attempt < max_retries - 1:
+                logger.warning(f"[上传] 群文件上传失败 (第 {attempt + 1} 次尝试): {type(error).__name__}, 1秒后重试...")
+                await asyncio.sleep(1)
+            else:
+                logger.error(f"[上传] 群文件上传失败: {type(error).__name__}: {error}", exc_info=True)
+                raise
 
 
 def calculate_sha256(file_path: Path) -> str:
@@ -281,16 +311,22 @@ async def upload_to_group_file_with_fallback(
 async def handle_download(
     bot: Bot, event: MessageEvent, args: Message = CommandArg()
 ) -> None:
-    keyword = args.extract_plain_text().strip()
-    logger.info(f"[下载处理] 开始处理下载请求: keyword='{keyword}'")
+    raw_input = args.extract_plain_text().strip()
+    
+    # 解析 -original 标志
+    use_original = "-original" in raw_input
+    keyword = raw_input.replace("-original", "").strip()
+    
+    logger.info(f"[下载处理] 开始处理下载请求: keyword='{keyword}', use_original={use_original}")
     if not keyword:
         logger.warning(f"[下载处理] 下载无效")
-        await download_cmd.finish("用法: /download [Name]")
+        await download_cmd.finish("用法: /download [-original] [Name]")
 
     client = build_client()
     options = build_search_options()
-    await download_cmd.send("正在搜索并准备下载，请稍候...")
-    logger.info(f"[下载处理] 创建 EHentai 客户端，开始流程")
+    quality = "original" if use_original else "resample"
+    await download_cmd.send(f"正在搜索并准备下载（{quality}版本），请稍候...")
+    logger.info(f"[下载处理] 创建 EHentai 客户端，开始流程，质量={quality}")
     logger.debug(f"[下载处理] backend={client.backend}, enable_direct_ip={client.enable_direct_ip}")
 
     if not client.has_login_cookies():
@@ -325,7 +361,7 @@ async def handle_download(
 
     try:
         logger.info(f"[下载处理] 解析存档下载链接")
-        archive_url = await client.resolve_archive_url(gallery.url)
+        archive_url = await client.resolve_archive_url(gallery.url, prefer_original=use_original)
     except Exception as error:
         logger.error(f"[下载处理] 解析存档失败: {type(error).__name__}: {error}", exc_info=True)
         await download_cmd.finish(f"解析下载链接失败: {error}")
@@ -357,9 +393,45 @@ async def handle_download(
         logger.info(f"[下载处理] 上传群文件成功")
     except Exception as error:
         logger.error(f"[下载处理] 上传群文件失败: {type(error).__name__}: {error}", exc_info=True)
-        # 上传失败时，尝试发送简短的消息而不是完整错误
+        # 上传失败时，尝试 R2 备用方案
+        file_size_mb = file_path.stat().st_size / 1024 / 1024
+        r2_manager = get_r2_manager()
+        
+        if r2_manager and r2_manager.is_available:
+            logger.info(f"[下载处理] 群文件上传失败，尝试 R2 备用上传...")
+            try:
+                r2_url = await r2_manager.upload_file(str(file_path), file_path.name)
+                if r2_url:
+                    logger.info(f"[下载处理] R2 上传成功: {r2_url}")
+                    # 获取统计信息
+                    stats = await r2_manager.get_upload_stats()
+                    msg = (
+                        f"✓ 下载完成！\n"
+                        f"群文件上传失败，已备用上传到 R2 CDN\n\n"
+                        f"下载链接：\n{r2_url}\n\n"
+                        f"链接有效期: {r2_manager.retention_hours} 小时\n"
+                        f"R2 用量: {stats.get('total_size_mb', 0):.1f}/{stats.get('max_size_mb', 0):.0f} MB "
+                        f"({stats.get('usage_percent', 0):.1f}%)"
+                    )
+                    await download_cmd.finish(msg)
+                    return
+                else:
+                    logger.error(f"[下载处理] R2 上传失败")
+            except Exception as r2_error:
+                logger.error(f"[下载处理] R2 上传异常: {type(r2_error).__name__}: {r2_error}", exc_info=True)
+        
+        # R2 也不可用，返回文件信息
         try:
-            await download_cmd.finish(f"✓ 下载完成，上传失败（{type(error).__name__}）")
+            msg = (
+                f"✓ 下载完成！\n"
+                f"但群文件上传超时/失败（{type(error).__name__}）\n\n"
+                f"文件信息：\n"
+                f"- 文件名: {file_path.name}\n"
+                f"- 大小: {file_size_mb:.2f} MB\n"
+                f"- 路径: {file_path}\n\n"
+                f"请稍候 30 秒后手动下载，或联系管理员。"
+            )
+            await download_cmd.finish(msg)
         except ActionFailed:
             logger.error(f"[下载处理] 无法通知用户")
             pass
