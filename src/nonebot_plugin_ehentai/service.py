@@ -121,6 +121,7 @@ class EHentaiClient:
         impersonate: str = "chrome124",
         enable_direct_ip: bool = True,
         curl_cffi_skip_on_error: bool = True,
+        min_cache_file_size_kb: int = 100,
     ) -> None:
         self.site = site.lower()
         self.base_url = self._resolve_base_url(site, base_url)
@@ -143,6 +144,7 @@ class EHentaiClient:
         self.impersonate = impersonate
         self.enable_direct_ip = enable_direct_ip
         self.curl_cffi_skip_on_error = curl_cffi_skip_on_error
+        self.min_cache_file_size_bytes = min_cache_file_size_kb * 1024
 
     @staticmethod
     def _resolve_base_url(site: str, base_url: str) -> str:
@@ -1201,8 +1203,8 @@ class EHentaiClient:
             file_size = save_path.stat().st_size
             logger.info(f"[下载] 文件已存在: {save_path.name} ({file_size / 1024 / 1024:.2f} MB)")
             
-            # 如果文件大小超过 1MB，认为是有效缓存，直接返回
-            if file_size > 1024 * 1024:
+            # 如果文件大小超过最小阈值，认为是有效缓存，直接返回
+            if file_size >= self.min_cache_file_size_bytes:
                 logger.info(f"[下载] 使用缓存文件（已存在）")
                 return save_path
             else:

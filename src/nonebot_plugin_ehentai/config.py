@@ -16,6 +16,8 @@ class Config(BaseModel):
     ehentai_timeout: int = 20
     ehentai_max_results: int = 5
     ehentai_download_dir: str = "data/ehentai"
+    ehentai_download_timeout: int = 60  # 单机文件下载超时时间（秒）
+    ehentai_min_cache_file_size_kb: int = 100  # 最小缓存文件大小（KB），小于此大小的文件视为残留
     ehentai_proxy: str = ""
     ehentai_http_backend: str = "httpx"
     ehentai_http3: bool = True
@@ -45,7 +47,7 @@ class Config(BaseModel):
     ehentai_r2_secret_access_key: str = ""
     ehentai_r2_bucket_name: str = "ehentai"
     ehentai_r2_endpoint: str = ""
-    ehentai_r2_public_domain: str = "https://pub-REDACTED.r2.dev"
+    ehentai_r2_public_domain: str = "https://botgeneratedcontent.0061226.xyz"
     ehentai_r2_max_total_size_mb: int = 3072  # 3GB in MB
     ehentai_r2_file_retention_hours: int = 24
     ehentai_r2_enabled: bool = False

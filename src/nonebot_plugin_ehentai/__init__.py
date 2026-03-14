@@ -73,6 +73,7 @@ def build_client() -> EHentaiClient:
         impersonate=plugin_config.ehentai_impersonate,
         enable_direct_ip=plugin_config.ehentai_enable_direct_ip,
         curl_cffi_skip_on_error=plugin_config.ehentai_curl_cffi_skip_on_error,
+        min_cache_file_size_kb=plugin_config.ehentai_min_cache_file_size_kb,
     )
 
 
