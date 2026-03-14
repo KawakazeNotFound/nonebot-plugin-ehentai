@@ -40,13 +40,36 @@ CHROME_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 
 
 @dataclass
-@dataclass
 class GalleryResult:
-    title: str
-    url: str
+    """对标 EhViewer 官方的 BaseGalleryInfo"""
+    # 核心字段
     gid: str
     token: str
-    cover_url: str = ""
+    title: str
+    url: str
+    
+    # 元数据字段
+    category: str = ""  # 分类：Manga, Doujinshi, Cosplay 等
+    posted: str = ""  # 发布日期
+    uploader: str = ""  # 上传者
+    rating: float = -1.0  # 评分 0-5，-1 表示未评分
+    pages: int = 0  # 页数
+    
+    # 缩略图信息（对标官方的 thumbKey）
+    cover_url: str = ""  # 缩略图 URL
+    thumb_width: int = 0
+    thumb_height: int = 0
+    
+    # 标签列表
+    tags: list[str] = None  # 标签列表
+    
+    # 其他元数据
+    disowned: bool = False  # 是否被遗弃（显示为灰色）
+    favorited: int = -1  # 收藏槽位选择：-1 未收藏
+    
+    def __post_init__(self):
+        if self.tags is None:
+            self.tags = []
 
 
 @dataclass
@@ -56,6 +79,13 @@ class ArchiveOption:
     size: str
     cost: str
     is_hath: bool
+
+
+def _safe_error_text(error: Exception) -> str:
+    try:
+        return str(error)
+    except Exception:
+        return repr(error)
 
 
 @dataclass
@@ -362,50 +392,215 @@ class EHentaiClient:
 
     @staticmethod
     def _clean_title(title: str) -> str:
-        """清理标题中的 f: 标签"""
+        """清理标题中的 f: 标签
+        
+        对标官方：html.unescape() + 移除搜索过滤标签
+        """
+        import html
+        # Step 1: 解码 HTML 实体（与官方 unescape 一致）
+        title = html.unescape(title)
+        # Step 2: 移除所有 f:xxx 搜索过滤标签
         import re
-        # 移除所有 f:xxx 标签
         cleaned = re.sub(r'\s*f:\S+', '', title)
-        # 移除多个连续空格
+        # Step 3: 移除多个连续空格
         cleaned = re.sub(r'\s+', ' ', cleaned)
         return cleaned.strip()
 
+    @staticmethod
+    def _parse_category(row) -> str:
+        """提取分类标签（对标官方）
+        
+        查找 .cn 或 .cs 元素，映射到分类名称
+        """
+        category_elem = row.select_one(".cn") or row.select_one(".cs")
+        if category_elem:
+            return category_elem.get_text(strip=True)
+        return ""
+
+    @staticmethod
+    def _parse_rating(row) -> float:
+        """解析评分（对标官方 parse_rating）
+        
+        从 .ir 元素的 CSS background-position 计算评分
+        """
+        ir_elem = row.select_one(".ir")
+        if not ir_elem:
+            return -1.0
+        
+        style = ir_elem.get("style", "")
+        # 匹配像素值：background-position: 0px -16px; 或 background: 0px -21px;
+        import re
+        matches = re.findall(r'(\d+)px', style)
+        if len(matches) < 2:
+            return -1.0
+        
+        try:
+            num1, num2 = int(matches[0]), int(matches[1])
+            # 官方逻辑：5 - (num1 // 16) 是简单的评星计算
+            # num1 的每 16px 代表一半星（官方精度 0.5 星）
+            rate = 5 - num1 // 16
+            
+            # 如果 num2 是 21（vs 0），表示半颗星
+            if num2 == 21:
+                return (rate - 1) + 0.5
+            else:
+                return float(rate)
+        except (ValueError, ZeroDivisionError):
+            return -1.0
+
+    @staticmethod
+    def _parse_posted(row) -> str:
+        """提取发布日期（对标官方）
+        
+        从 #posted_{GID} 元素获取日期
+        """
+        # 先尝试标准日期格式
+        date_elem = row.select_one("div[id^='posted_']")
+        if date_elem:
+            return date_elem.get_text(strip=True)
+        
+        # 备用：查找 gl3e 容器中的日期
+        gl3e = row.select_one(".gl3e")
+        if gl3e:
+            divs = gl3e.find_all("div", recursive=False)
+            if len(divs) >= 2:
+                return divs[1].get_text(strip=True)
+        
+        return ""
+
+    @staticmethod
+    def _parse_uploader(row) -> str:
+        """提取上传者名称（对标官方）
+        
+        从 <a href="...uploader/..."> 获取文本
+        """
+        uploader_link = row.select_one("a[href*='/uploader/']")
+        if uploader_link:
+            return uploader_link.get_text(strip=True)
+        
+        # 备用：从 gl3e 中的所有链接查找
+        gl3e = row.select_one(".gl3e")
+        if gl3e:
+            for link in gl3e.find_all("a"):
+                href = link.get("href", "")
+                if "uploader" in href:
+                    return link.get_text(strip=True)
+        
+        return ""
+
+    @staticmethod
+    def _parse_pages(row) -> int:
+        """提取页数（对标官方）
+        
+        查找包含 "pages" 的文本
+        """
+        import re
+        # 最常见：在 gl3e 最后一个 div 中
+        gl3e = row.select_one(".gl3e")
+        if gl3e:
+            text = gl3e.get_text()
+            match = re.search(r'(\d+)\s*pages?', text, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+        
+        # 备用：整行查找
+        row_text = row.get_text()
+        match = re.search(r'(\d+)\s*pages?', row_text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        
+        return 0
+
+    @staticmethod
+    def _parse_tags(row) -> list[str]:
+        """提取标签列表（对标官方）
+        
+        从 .gt 和 .gtl 元素的 title 属性提取
+        """
+        tags = []
+        for tag_elem in row.select(".gt, .gtl"):
+            if tag_elem.get("title"):
+                tags.append(tag_elem["title"])
+        return tags
+
+    @staticmethod
+    def _parse_thumb_resolution(row) -> tuple[int, int]:
+        """提取缩略图尺寸（对标官方 parse_thumb_resolution）
+        
+        从图片 style 属性的 height/width 计算
+        """
+        img = row.select_one("img")
+        if not img:
+            return 0, 0
+        
+        style = img.get("style", "")
+        import re
+        
+        # 查找 height 和 width
+        height_match = re.search(r'height\s*:\s*(\d+)px', style)
+        width_match = re.search(r'width\s*:\s*(\d+)px', style)
+        
+        height = int(height_match.group(1)) if height_match else 0
+        width = int(width_match.group(1)) if width_match else 0
+        
+        return width, height
+
+    @staticmethod
+    def _parse_disowned(row) -> bool:
+        """检测是否被遗弃（显示为灰色）
+        
+        检查 opacity 或其他灰显标记
+        """
+        row_style = row.get("style", "")
+        # 官方标记：opacity:0.5
+        return "opacity:0.5" in row_style or "opacity: 0.5" in row_style
+
     def _parse_search_results(self, body: str, limit: int) -> list[GalleryResult]:
+        """完全对标 EhViewer 官方搜索结果解析
+        
+        流程：
+        1. 检查搜索警告页面
+        2. 定位 .itg 容器（table 或 div）
+        3. 遍历行/块元素
+        4. 按官方顺序提取所有字段
+        5. 去重并限制数量
+        """
         soup = BeautifulSoup(body, "html.parser")
         
-        # 检查是否是搜索警告页面
+        # Step 1: 检查搜索警告页面（对标官方）
         if soup.select_one(".searchwarn") is not None:
             logger.warning(f"[搜索解析] 搜索页面返回警告信息 (可能无权限访问或搜索限制)")
             return []
 
-        # EhViewer 同款：先取 .itg 容器，再兼容 table/div 两种布局
+        # Step 2: 获取 .itg 容器（对标官方 get_vdom_first_element_by_class_name）
         itg = soup.select_one(".itg")
         if itg is None:
             logger.warning("[搜索解析] 未找到 .itg 容器")
             return []
 
+        # Step 3: 遍历行/块，支持 table 和 div 两种布局（对标官方）
         if itg.name and itg.name.lower() == "table":
             nodes = itg.select("tr")
-            # 跳过表头
+            # 跳过表头行（官方自动处理，Python 需手动跳过）
             nodes = nodes[1:] if len(nodes) > 1 else []
-            logger.debug(f"[搜索解析] itg=table, 候选行数={len(nodes)}")
+            logger.debug(f"[搜索解析] 容器类型=table, 候选行数={len(nodes)}")
         else:
+            # div 模式：只取第一级子元素
             nodes = [child for child in itg.find_all(recursive=False) if getattr(child, "name", None)]
-            logger.debug(f"[搜索解析] itg={itg.name}, 候选块数={len(nodes)}")
+            logger.debug(f"[搜索解析] 容器类型={itg.name}, 候选块数={len(nodes)}")
 
         results: list[GalleryResult] = []
         seen: set[str] = set()
         
+        # Step 4: 循环解析每一行/块（对标官方 parse_gallery_info）
         for idx, row in enumerate(nodes, 1):
-            # 先按 EhViewer 的 glname->a 取详情链接
+            # 4.1: 获取标题链接（对标官方的三层备选方案）
             glname = row.select_one(".glname")
             title_anchor = glname.select_one("a[href]") if glname else None
 
-            # 备用：直接找可能的详情链接
             if not title_anchor:
                 title_anchor = row.select_one("a[href*='/g/'], a[href*='/mpv/']")
 
-            # 再兜底：从所有 a 中扫描 /g/<gid>/<token>
             if not title_anchor:
                 for link in row.find_all("a", href=True):
                     href = link.get("href", "").strip()
@@ -417,30 +612,35 @@ class EHentaiClient:
                 logger.debug(f"[搜索解析] 第 {idx} 行: 未找到标题链接")
                 continue
             
+            # 4.2: 提取标题
             href_raw = title_anchor.get("href", "").strip()
             title_node = row.select_one(".glink")
             title = title_node.get_text(" ", strip=True) if title_node else title_anchor.get_text(" ", strip=True)
             
             if not href_raw or not title:
-                logger.debug(f"[搜索解析] 第 {idx} 行: 标题或链接为空 (href={bool(href_raw)}, title={bool(title)})")
+                logger.debug(f"[搜索解析] 第 {idx} 行: 标题或链接为空")
                 continue
 
-            # 清理标题中的 f: 标签
+            # 重要：清理标题中的 HTML 实体和 f: 标签（对标官方 unescape）
             title = self._clean_title(title)
             
+            # 4.3: 提取 GID/Token
             href = self._normalize_gallery_url(href_raw)
             gid_token = self._extract_gid_token(href)
             if not gid_token:
-                logger.debug(f"[搜索解析] 第 {idx} 行: 无法提取 gid/token (href={href})")
+                logger.debug(f"[搜索解析] 第 {idx} 行: 无法提取 gid/token")
                 continue
 
             gid, token = gid_token
+            
+            # 4.4: 去重（对标官方）
             dedupe_key = f"{gid}:{token}"
             if dedupe_key in seen:
                 logger.debug(f"[搜索解析] 第 {idx} 行: 重复的 {dedupe_key}")
                 continue
-
-            # 获取封面图片 URL
+            seen.add(dedupe_key)
+            
+            # 4.5: 获取缩略图 URL（对标官方：data-src 优先，过滤 base64）
             img = row.select_one("img[data-src], img[src]")
             cover_url = ""
             if img:
@@ -448,14 +648,42 @@ class EHentaiClient:
                 if cover_url.startswith("data:image"):
                     cover_url = ""
             
-            seen.add(dedupe_key)
-            result = GalleryResult(title=title, url=href, gid=gid, token=token, cover_url=cover_url)
+            # 4.6: 提取所有元数据字段（对标官方）
+            category = self._parse_category(row)
+            rating = self._parse_rating(row)
+            posted = self._parse_posted(row)
+            uploader = self._parse_uploader(row)
+            pages = self._parse_pages(row)
+            tags = self._parse_tags(row)
+            thumb_width, thumb_height = self._parse_thumb_resolution(row)
+            disowned = self._parse_disowned(row)
+            
+            # 5. 组装完整结果（对标官方 BaseGalleryInfo）
+            result = GalleryResult(
+                gid=gid,
+                token=token,
+                title=title,
+                url=href,
+                category=category,
+                posted=posted,
+                uploader=uploader,
+                rating=rating,
+                pages=pages,
+                cover_url=cover_url,
+                thumb_width=thumb_width,
+                thumb_height=thumb_height,
+                tags=tags,
+                disowned=disowned,
+                favorited=-1,  # 初始未收藏
+            )
             results.append(result)
             logger.debug(f"[搜索解析] 第 {idx} 行: ✓ 解析成功 - {title[:30]}")
+            
+            # 5. 限制数量（对标官方 parse_info_list 的 limit 参数）
             if len(results) >= limit:
                 break
 
-        logger.info(f"[搜索解析] 共解析 {len(results)} 个结果")
+        logger.info(f"[搜索解析] 共解析 {len(results)} 个结果/最多 {limit} 个")
         return results
 
     def _search_from_response(self, resp, limit: int) -> list[GalleryResult]:
@@ -611,22 +839,33 @@ class EHentaiClient:
         prefer_original=False: 优先选择 resample（小文件）
         prefer_original=True: 优先选择 original（高质量）
         """
+
+        def is_original(item: ArchiveOption) -> bool:
+            text = f"{item.res} {item.name}".lower()
+            return any(key in text for key in ("org", "original", "source"))
+
+        def is_resample(item: ArchiveOption) -> bool:
+            text = f"{item.res} {item.name}".lower()
+            return any(key in text for key in ("resample", "resampled", "res"))
+
+        normal_options = [item for item in options if not item.is_hath]
+        if not normal_options:
+            return options[0]
+
         if prefer_original:
-            # 优先原始质量
-            preferred = next(
-                (item for item in options if not item.is_hath and item.res == "org"),
-                None,
-            )
+            preferred = next((item for item in normal_options if is_original(item)), None)
             if preferred is None:
-                preferred = next((item for item in options if not item.is_hath), options[0])
+                preferred = normal_options[0]
         else:
-            # 默认选择 resample（小文件）
-            preferred = next(
-                (item for item in options if not item.is_hath and item.res == "resample"),
-                None,
-            )
+            preferred = next((item for item in normal_options if is_resample(item)), None)
             if preferred is None:
-                preferred = next((item for item in options if not item.is_hath), options[0])
+                preferred = next((item for item in normal_options if not is_original(item)), None)
+            if preferred is None:
+                preferred = normal_options[0]
+
+        logger.debug(
+            f"[存档] 存档选项选择: prefer_original={prefer_original}, chosen=(res={preferred.res}, name={preferred.name}, size={preferred.size})"
+        )
         return preferred
 
     def _parse_archive_options(self, body: str) -> list[ArchiveOption]:
@@ -640,6 +879,7 @@ class EHentaiClient:
                 continue
 
             input_tag = block.select_one("form input[value]")
+            name_tag = block.select_one("form div input[value]")
             size_tag = block.select_one("p strong")
             cost_tag = block.select_one("div strong")
             if not input_tag or not size_tag or not cost_tag:
@@ -649,10 +889,16 @@ class EHentaiClient:
             if not res:
                 continue
 
+            name_text = ""
+            if name_tag is not None:
+                name_text = name_tag.get("value", "").strip()
+            if not name_text:
+                name_text = block.get_text(" ", strip=True)
+
             options.append(
                 ArchiveOption(
                     res=res,
-                    name="",
+                    name=name_text,
                     size=size_tag.get_text(" ", strip=True),
                     cost=cost_tag.get_text(" ", strip=True).replace(",", ""),
                     is_hath=False,
@@ -939,8 +1185,36 @@ class EHentaiClient:
         return save_path
 
     async def download_file(self, url: str, save_path: Path) -> Path:
+        """下载文件到本地
+        
+        处理逻辑：
+        1. 如果文件已存在且大小合理，直接返回（缓存优化）
+        2. 如果文件部分下载（残留），先删除
+        3. 创建下载目录
+        4. 下载文件到临时位置，完成后再移动
+        """
         logger.info(f"[下载] 开始下载文件: {url}")
         logger.debug(f"[下载] 保存路径: {save_path}")
+        
+        # 关键改进：检查文件是否已存在
+        if save_path.exists():
+            file_size = save_path.stat().st_size
+            logger.info(f"[下载] 文件已存在: {save_path.name} ({file_size / 1024 / 1024:.2f} MB)")
+            
+            # 如果文件大小超过 1MB，认为是有效缓存，直接返回
+            if file_size > 1024 * 1024:
+                logger.info(f"[下载] 使用缓存文件（已存在）")
+                return save_path
+            else:
+                # 文件太小，可能是残留的不完整文件，删除重新下载
+                logger.warning(f"[下载] 文件过小（{file_size} 字节），可能是残留，删除后重新下载")
+                try:
+                    save_path.unlink()
+                    logger.debug(f"[下载] 删除不完整文件成功")
+                except Exception as e:
+                    logger.error(f"[下载] 删除文件失败: {e}")
+                    # 继续尝试覆盖
+        
         if self.backend == "curl_cffi":
             try:
                 logger.debug(f"[下载] 使用 curl_cffi 后端")
@@ -1014,20 +1288,31 @@ class EHentaiClient:
 
         # 降级到标准 httpx 客户端
         logger.debug(f"[下载] 使用标准 DNS 模式")
-        async with httpx.AsyncClient(
-            timeout=self.timeout,
-            verify=False,
-            follow_redirects=True,
-        ) as client:
-            logger.debug(f"[下载] 开始下载流 (标准 DNS)")
-            async with client.stream("GET", url, headers=self._headers_for_url(url)) as resp:
-                self._raise_for_response(resp)
-                logger.debug(f"[下载] 响应状态码: {resp.status_code}")
-                downloaded = 0
-                with save_path.open("wb") as file:
-                    async for chunk in resp.aiter_bytes(chunk_size=1024 * 128):
-                        file.write(chunk)
-                        downloaded += len(chunk)
-            logger.info(f"[下载] 下载成功，大小: {downloaded / 1024 / 1024:.2f} MB")
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                verify=False,
+                follow_redirects=True,
+            ) as client:
+                logger.debug(f"[下载] 开始下载流 (标准 DNS)")
+                async with client.stream("GET", url, headers=self._headers_for_url(url)) as resp:
+                    self._raise_for_response(resp)
+                    logger.debug(f"[下载] 响应状态码: {resp.status_code}")
+                    downloaded = 0
+                    with save_path.open("wb") as file:
+                        async for chunk in resp.aiter_bytes(chunk_size=1024 * 128):
+                            file.write(chunk)
+                            downloaded += len(chunk)
+                logger.info(f"[下载] 下载成功，大小: {downloaded / 1024 / 1024:.2f} MB")
 
-        return save_path
+            return save_path
+        except Exception as error:
+            # 下载失败，清理部分下载的文件（防止第二次重试时出错）
+            logger.error(f"[下载] 标准 DNS 下载失败: {type(error).__name__}: {error}")
+            if save_path.exists():
+                try:
+                    save_path.unlink()
+                    logger.debug(f"[下载] 清理失败的部分下载文件")
+                except Exception as cleanup_error:
+                    logger.warning(f"[下载] 清理文件失败: {cleanup_error}")
+            raise

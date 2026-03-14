@@ -26,6 +26,9 @@ class Config(BaseModel):
     ehentai_stream_upload_first: bool = True
     ehentai_stream_chunk_size: int = 256 * 1024
     ehentai_stream_file_retention_ms: int = 5 * 60 * 1000
+    ehentai_upload_to_group_file: bool = False  # 默认禁用群文件上传，避免 NapCat 不稳定导致的错误
+    ehentai_prefer_r2_over_group_file: bool = True  # 默认优先使用 R2 上传
+    ehentai_use_napcat_stream_upload: bool = True  # 默认开启流上传（如果用户手动启用了群文件上传，此项更稳定）
     ehentai_search_f_cats: int = 0
     ehentai_search_advsearch: bool = False
     ehentai_search_f_sh: bool = False
@@ -47,6 +50,12 @@ class Config(BaseModel):
     ehentai_r2_file_retention_hours: int = 24
     ehentai_r2_enabled: bool = False
 
+    # Cloudflare D1 数据库配置
+    ehentai_d1_account_id: str = "" # 如果为空，尝试从 R2 Endpoint 自动提取
+    ehentai_d1_database_id: str = ""
+    ehentai_d1_api_token: str = "" # 需要有 D1 编辑权限的令牌
+    ehentai_d1_enabled: bool = False
+
     @field_validator(
         "ehentai_cookie",
         "ehentai_ipb_member_id",
@@ -56,6 +65,9 @@ class Config(BaseModel):
         "ehentai_r2_access_key_id",
         "ehentai_r2_secret_access_key",
         "ehentai_r2_endpoint",
+        "ehentai_d1_account_id",
+        "ehentai_d1_database_id",
+        "ehentai_d1_api_token",
         mode="before",
     )
     @classmethod
