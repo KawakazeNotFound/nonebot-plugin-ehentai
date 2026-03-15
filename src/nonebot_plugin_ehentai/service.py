@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import re
 import ssl
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -13,7 +12,7 @@ import httpx
 from bs4 import BeautifulSoup
 from nonebot import logger
 
-from .network import EhHttpRouter, BUILT_IN_HOSTS
+from .network import BUILT_IN_HOSTS
 
 try:
     from curl_cffi import requests as curl_requests
@@ -925,89 +924,6 @@ class EHentaiClient:
 
         return options
 
-    def _request_archive_download_url_sync(
-        self,
-        session,
-        gid: str,
-        token: str,
-        archive_option: ArchiveOption,
-    ) -> Optional[str]:
-        archive_url = f"{self.base_url}/archiver.php?gid={gid}&token={token}"
-        payload: dict[str, str] = {}
-
-        if archive_option.is_hath:
-            payload["hathdl_xres"] = archive_option.res
-        else:
-            payload["dltype"] = archive_option.res
-            payload["dlcheck"] = (
-                "Download Original Archive"
-                if archive_option.res == "org"
-                else "Download Resample Archive"
-            )
-
-        def do_post() -> Optional[str]:
-            resp = session.post(
-                archive_url, data=payload, headers=self._headers_for_url(archive_url)
-            )
-            self._raise_for_response(resp)
-            body = resp.text
-            if NEED_HATH_CLIENT_MSG in body:
-                raise RuntimeError("当前账号未分配 H@H 客户端，无法使用该下载方式")
-            if INSUFFICIENT_FUNDS_MSG in body:
-                raise RuntimeError("当前账号 GP/Credits 不足，无法下载该归档")
-
-            soup = BeautifulSoup(body, "html.parser")
-            continue_link = soup.select_one("#continue a[href]")
-            if continue_link is None:
-                return None
-
-            href = continue_link.get("href", "").strip()
-            if not href:
-                return None
-
-            full = self._normalize_gallery_url(href)
-            return f"{full}?start=1"
-
-        result = do_post()
-        if result is None and not archive_option.is_hath:
-            time.sleep(1)
-            result = do_post()
-        return result
-
-    def _resolve_archive_url_sync(
-        self, gallery_url: str, http3: Optional[bool] = None
-    ) -> Optional[str]:
-        gid_token = self._extract_gid_token(gallery_url)
-        if not gid_token:
-            return None
-
-        gid, token = gid_token
-        archive_page_url = f"{self.base_url}/archiver.php?gid={gid}&token={token}"
-
-        with self._curl_session(http3=http3) as session:
-            archive_resp = session.get(
-                archive_page_url, headers=self._headers_for_url(archive_page_url)
-            )
-            self._raise_for_response(archive_resp)
-            archive_page = archive_resp.text
-            if self._is_login_required_page(archive_page):
-                raise RuntimeError("下载归档需要已登录的 E-Hentai/ExHentai Cookie")
-            if NEED_HATH_CLIENT_MSG in archive_page:
-                return None
-
-            options = self._parse_archive_options(archive_page)
-            if not options:
-                return None
-
-            preferred = next(
-                (item for item in options if not item.is_hath and item.res == "org"),
-                None,
-            )
-            if preferred is None:
-                preferred = next((item for item in options if not item.is_hath), options[0])
-
-            return self._request_archive_download_url_sync(session, gid, token, preferred)
-
     async def _request_archive_download_url(
         self,
         client: httpx.AsyncClient,
@@ -1160,19 +1076,6 @@ class EHentaiClient:
             url = await self._request_archive_download_url(client, gid, token, preferred)
             logger.info(f"[存档] 成功获取下载链接 (标准 DNS)")
             return url
-
-    def _download_file_sync(
-        self, url: str, save_path: Path, http3: Optional[bool] = None
-    ) -> Path:
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._curl_session(http3=http3) as session:
-            with session.stream("GET", url, headers=self._headers_for_url(url)) as resp:
-                self._raise_for_response(resp)
-                with save_path.open("wb") as file:
-                    for chunk in resp.iter_content(chunk_size=1024 * 128):
-                        if chunk:
-                            file.write(chunk)
-        return save_path
 
     async def download_file(self, url: str, save_path: Path) -> Path:
         """下载文件到本地
