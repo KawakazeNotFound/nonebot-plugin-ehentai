@@ -109,8 +109,8 @@ EHENTAI_R2_ENABLED=false
 - `EHENTAI_R2_ACCESS_KEY_ID`：R2 S3 API Token (Access Key ID)
 - `EHENTAI_R2_SECRET_ACCESS_KEY`：R2 S3 API Token (Secret Access Key)
 - `EHENTAI_R2_BUCKET_NAME`：R2 Bucket 名称，默认 `ehentai`
-- `EHENTAI_R2_ENDPOINT`：R2 终结点 URL（例如 `https://REDACTED.r2.cloudflarestorage.com`）
-- `EHENTAI_R2_PUBLIC_DOMAIN`：R2 公开访问域名（例如 `https://pub-xxx.r2.dev`）
+- `EHENTAI_R2_ENDPOINT`：R2 终结点 URL（例如 `https://{ACCOUNT_ID}.r2.cloudflarestorage.com`）
+- `EHENTAI_R2_PUBLIC_DOMAIN`：R2 公开访问域名（例如 `https://pub-{CUSTOM_DOMAIN}.r2.dev`）
 - `EHENTAI_R2_MAX_TOTAL_SIZE_MB`：R2 最大存储限制，默认 3072 MB（3 GB）
 - `EHENTAI_R2_FILE_RETENTION_HOURS`：文件保留时间，默认 24 小时（过期自动删除）
 - `EHENTAI_R2_ENABLED`：是否启用 R2 备用上传，默认关闭
