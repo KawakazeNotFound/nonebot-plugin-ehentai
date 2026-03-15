@@ -148,6 +148,47 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Security and sensitive files
+# Certificates, keys, and keystores
+*.jks
+*.keystore
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cert
+keystore/
+*/keystore/
+
+# Configuration with secrets
+.env.local
+.env.*.local
+.env.production
+config/secrets.json
+config/private.json
+local.properties
+local.gradle.properties
+
+# AWS and cloud credentials
+~/.aws
+.aws/
+credentials
+.credentials
+
+# API keys and tokens (prevent accidental commits)
+.api_keys
+.tokens
+secrets.json
+*secret*.json
+*private*.json
+config.secrets.json
+
+# IDE and editor secrets
+.vscode/settings.local.json
+.idea/credentials.txt
+.idea/config.xml
+
 # pytype static type analyzer
 .pytype/
 
