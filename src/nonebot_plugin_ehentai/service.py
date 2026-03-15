@@ -6,7 +6,7 @@ import ssl
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -58,6 +58,10 @@ class GalleryResult:
     cover_url: str = ""  # 缩略图 URL
     thumb_width: int = 0
     thumb_height: int = 0
+
+    # 标题补全信息（来自 gdata API）
+    title_jpn: str = ""  # 日文原文标题
+    has_japanese_title: int = 0  # 1=有日文原文，0=无
     
     # 标签列表
     tags: list[str] = None  # 标签列表
@@ -390,6 +394,83 @@ class EHentaiClient:
                 params["f_spt"] = str(options.f_spt)
 
         return f"{self.base_url}/?{urlencode(params)}"
+
+    def _resolve_gmetadata_api_url(self) -> str:
+        host = (urlparse(self.base_url).hostname or "").lower()
+        if "exhentai.org" in host:
+            return "https://s.exhentai.org/api.php"
+        return "https://api.e-hentai.org/api.php"
+
+    async def _enrich_japanese_titles(self, results: list[GalleryResult]) -> None:
+        if not results:
+            return
+
+        gidlist: list[list[object]] = []
+        for item in results:
+            try:
+                gidlist.append([int(item.gid), item.token])
+            except Exception:
+                continue
+
+        if not gidlist:
+            return
+
+        api_url = self._resolve_gmetadata_api_url()
+        request_url = self._get_request_url_for_direct_ip(api_url) if self.enable_direct_ip else api_url
+        payload = {
+            "method": "gdata",
+            "gidlist": gidlist,
+            "namespace": 1,
+        }
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                verify=False,
+                follow_redirects=True,
+                proxy=self.proxy or None,
+            ) as client:
+                resp = await client.post(
+                    request_url,
+                    json=payload,
+                    headers=self._headers_for_url(api_url),
+                )
+        except Exception as error:
+            logger.warning(
+                f"[搜索补全] 拉取日文原文失败: {type(error).__name__}: {_safe_error_text(error)}"
+            )
+            return
+
+        if resp.status_code != 200:
+            logger.warning(f"[搜索补全] gdata API 返回状态码异常: {resp.status_code}")
+            return
+
+        try:
+            data = resp.json()
+        except Exception as error:
+            logger.warning(
+                f"[搜索补全] gdata API JSON 解析失败: {type(error).__name__}: {_safe_error_text(error)}"
+            )
+            return
+
+        gmetadata = data.get("gmetadata", []) if isinstance(data, dict) else []
+        if not isinstance(gmetadata, list):
+            return
+
+        jpn_map: dict[tuple[str, str], str] = {}
+        for metadata in gmetadata:
+            if not isinstance(metadata, dict):
+                continue
+            gid = str(metadata.get("gid", "")).strip()
+            token = str(metadata.get("token", "")).strip()
+            title_jpn_raw = str(metadata.get("title_jpn", "")).strip()
+            if gid and token:
+                jpn_map[(gid, token)] = self._clean_title(title_jpn_raw)
+
+        for item in results:
+            title_jpn = jpn_map.get((item.gid, item.token), "")
+            item.title_jpn = title_jpn
+            item.has_japanese_title = 1 if title_jpn else 0
 
     @staticmethod
     def _clean_title(title: str) -> str:
@@ -748,7 +829,9 @@ class EHentaiClient:
         if self.backend == "curl_cffi":
             try:
                 logger.debug(f"[搜索] 使用 curl_cffi 后端搜索")
-                return await asyncio.to_thread(self._search_sync, keyword, limit, options)
+                results = await asyncio.to_thread(self._search_sync, keyword, limit, options)
+                await self._enrich_japanese_titles(results)
+                return results
             except Exception as error:
                 logger.warning(f"[搜索] curl_cffi 搜索出错: {type(error).__name__}: {error}")
                 if self.curl_cffi_skip_on_error:
@@ -756,9 +839,11 @@ class EHentaiClient:
                 else:
                     if self.http3 and self._is_quic_tls_error(error):
                         logger.info(f"[搜索] 检测到 QUIC/TLS 错误，自动降级到 HTTP/1.1")
-                        return await asyncio.to_thread(
+                        results = await asyncio.to_thread(
                             self._search_sync, keyword, limit, options, False
                         )
+                        await self._enrich_japanese_titles(results)
+                        return results
                     if not self._should_fallback_to_httpx(error):
                         logger.error(f"[搜索] 错误不可恢复，抛出异常")
                         raise
@@ -780,7 +865,9 @@ class EHentaiClient:
                     logger.debug(f"[搜索] 发送搜索请求 (直连 IP)")
                     resp = await client.get(request_url, headers=self._headers_for_url(search_url))
                 logger.info(f"[搜索] 直连 IP 搜索成功，状态码: {resp.status_code}")
-                return self._search_from_response(resp, limit)
+                results = self._search_from_response(resp, limit)
+                await self._enrich_japanese_titles(results)
+                return results
             except Exception as error:
                 if self._is_connect_error(error):
                     logger.warning(
@@ -799,7 +886,9 @@ class EHentaiClient:
                             logger.debug(f"[搜索] 发送搜索请求 (标准 DNS)")
                             resp = await client.get(search_url, headers=self._headers_for_url(search_url))
                         logger.info(f"[搜索] 标准 DNS 搜索成功，状态码: {resp.status_code}")
-                        return self._search_from_response(resp, limit)
+                        results = self._search_from_response(resp, limit)
+                        await self._enrich_japanese_titles(results)
+                        return results
                     finally:
                         self.enable_direct_ip = True
                 else:
@@ -816,7 +905,9 @@ class EHentaiClient:
             logger.debug(f"[搜索] 发送搜索请求 (标准 DNS)")
             resp = await client.get(search_url, headers=self._headers_for_url(search_url))
         logger.info(f"[搜索] 搜索成功，状态码: {resp.status_code}")
-        return self._search_from_response(resp, limit)
+        results = self._search_from_response(resp, limit)
+        await self._enrich_japanese_titles(results)
+        return results
 
     async def _get_archive_page(self, client: httpx.AsyncClient, gid: str, token: str) -> str:
         archive_page_url = f"{self.base_url}/archiver.php?gid={gid}&token={token}"
