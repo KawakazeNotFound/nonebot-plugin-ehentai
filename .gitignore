@@ -222,3 +222,4 @@ test_r2_config.py
 test_search_standalone.py
 examples/
 aidetest/
+.DS_Store

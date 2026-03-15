@@ -31,6 +31,12 @@ except Exception:
 
 from .config import Config
 from .service import EHentaiClient, SearchOptions
+from .search_logic import (
+    SearchExecutionError,
+    execute_gallery_search,
+    format_search_results_message,
+    pick_first_result,
+)
 from .r2 import init_r2_manager, get_r2_manager
 from .d1 import init_d1_manager, get_d1_manager
 
@@ -210,40 +216,22 @@ async def handle_search(args: Message = CommandArg()) -> None:
     logger.debug(f"[搜索处理] backend={client.backend}, enable_direct_ip={client.enable_direct_ip}")
 
     try:
-        logger.info(f"[搜索处理] 下发搜索请求")
-        results = await client.search(keyword, plugin_config.ehentai_max_results, options)
-    except Exception as error:
-        err_text = safe_exception_text(error)
-        logger.error(f"[搜索处理] 搜索失败: {type(error).__name__}: {err_text}", exc_info=False)
-        await search_cmd.finish(f"搜索失败: {err_text}")
+        results = await execute_gallery_search(
+            client,
+            keyword,
+            plugin_config.ehentai_max_results,
+            options,
+        )
+    except SearchExecutionError as error:
+        await search_cmd.finish(f"搜索失败: {error}")
 
     logger.info(f"[搜索处理] 搜索成功，找到 {len(results)} 个结果")
 
     if not results:
         await search_cmd.finish("没有找到结果，或当前 Cookie 权限不足。")
 
-    # 只取第一个结果
-    gallery = results[0]
-    logger.info(f"[搜索处理] 返回第一个结果: {gallery.title}")
-
-    # 构建消息：标题 + URL
-    message_text = f"{gallery.title}\n{gallery.url}"
-
-    # 如果有封面，构建带图片的消息
-    if gallery.cover_url:
-        logger.debug(f"[搜索处理] 封面 URL: {gallery.cover_url}")
-        try:
-            # 构建消息：图片 + 标题 + URL
-            msg = Message()
-            msg.append(MessageSegment.image(gallery.cover_url))
-            msg.append(MessageSegment.text(f"\n{message_text}"))
-            await search_cmd.finish(msg)
-        except Exception as e:
-            logger.warning(f"[搜索处理] 发送图片失败: {e}，降级为文本消息")
-            await search_cmd.finish(message_text)
-    else:
-        # 没有封面，只发送文本
-        await search_cmd.finish(message_text)
+    message_text = format_search_results_message(keyword, results)
+    await send_message_with_retry(search_cmd, message_text)
 
 
 def calculate_sha256(file_path: Path) -> str:
@@ -440,18 +428,18 @@ async def handle_download(
         await download_cmd.finish("/download 仅支持群聊使用（需要上传群文件）。")
 
     try:
-        logger.info(f"[下载处理] 下发搜索请求")
-        results = await client.search(keyword, 1, options)
-    except Exception as error:
-        err_text = safe_exception_text(error)
-        logger.error(f"[下载处理] 搜索失败: {type(error).__name__}: {err_text}", exc_info=False)
-        await download_cmd.finish(f"搜索失败: {err_text}")
+        results = await execute_gallery_search(client, keyword, 1, options)
+    except SearchExecutionError as error:
+        await download_cmd.finish(f"搜索失败: {error}")
 
     if not results:
         logger.warning(f"[下载处理] 未找到可下载的内容")
         await download_cmd.finish("没有找到可下载的本子。")
 
-    gallery = results[0]
+    gallery = pick_first_result(results)
+    if gallery is None:
+        logger.warning(f"[下载处理] 搜索返回空结果")
+        await download_cmd.finish("没有找到可下载的本子。")
     logger.info(f"[下载处理] 找到目标: gid={gallery.gid}, title={gallery.title[:50]}")
 
     try:
