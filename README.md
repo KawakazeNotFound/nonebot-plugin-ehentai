@@ -3,11 +3,11 @@
 一个用于 NoneBot2 + OneBot11（NapCat）的插件，提供：
 
 - `/search [Name]`：按名称搜索本子
-- `/download [Name]`：下载压缩包并上传到当前群文件
+- `/download [Name]`：下载压缩包并上传到当前~群文件~(修复中)/R2存储桶
 
 ## 安装
 
-在你的 NoneBot 项目中安装（开发阶段也可以本地 editable 安装）：
+在你的 NoneBot 项目中安装
 
 ```bash
 pip install -e .
@@ -45,7 +45,7 @@ EHENTAI_STREAM_UPLOAD_FIRST=true
 EHENTAI_STREAM_CHUNK_SIZE=262144
 EHENTAI_STREAM_FILE_RETENTION_MS=300000
 
-# 上传配置（若 NapCat 不稳定，可调整这些）
+# 上传配置（上传群文件发生如 rich media transfer failed 错误）
 EHENTAI_UPLOAD_TO_GROUP_FILE=true          # 是否尝试上传到群文件
 EHENTAI_PREFER_R2_OVER_GROUP_FILE=false    # 如果 R2 可用，优先使用 R2（不尝试群文件）
 EHENTAI_SEARCH_F_CATS=0
@@ -75,14 +75,14 @@ EHENTAI_R2_ENABLED=false
 - `EHENTAI_SITE`：站点选择，`e` 表示 `e-hentai.org`，`ex` 表示 `exhentai.org`
 - `EHENTAI_BASE_URL`：站点地址；通常无需手改，程序会优先根据 `EHENTAI_SITE` 选择站点
 - `EHENTAI_COOKIE`：原始 Cookie Header；若填写，将优先于下方身份 Cookie 配置
-- `EHENTAI_IPB_MEMBER_ID`：EhViewer 身份 Cookie 之一
-- `EHENTAI_IPB_PASS_HASH`：EhViewer 身份 Cookie 之一
-- `EHENTAI_IGNEOUS`：ExHentai 访问常用 Cookie；使用 `exhentai` 时通常需要
+- `EHENTAI_IPB_MEMBER_ID`：
+- `EHENTAI_IPB_PASS_HASH`：
+- `EHENTAI_IGNEOUS`：使用 `exhentai` 时通常需要
 - `EHENTAI_CF_CLEARANCE`：Cloudflare 验证 Cookie；如有可一并填写
 - `EHENTAI_TIMEOUT`：请求超时秒数
 - `EHENTAI_MAX_RESULTS`：`/search` 返回条数上限
 - `EHENTAI_DOWNLOAD_DIR`：压缩包下载到本地的目录
-- `EHENTAI_PROXY`：可选代理（例如 `http://127.0.0.1:7890`）
+- `EHENTAI_PROXY`：可选代理
 - `EHENTAI_HTTP_BACKEND`：HTTP 后端，支持 `curl_cffi` 或 `httpx`
 - `EHENTAI_HTTP3`：在 `curl_cffi` 后端下是否优先使用 HTTP/3
 - `EHENTAI_DESKTOP_SITE`：是否使用桌面站风格 UA；默认关闭，更接近 EhViewer 绕 Cloudflare 时的移动站策略
@@ -116,6 +116,7 @@ EHENTAI_R2_ENABLED=false
 - `EHENTAI_R2_ENABLED`：是否启用 R2 备用上传，默认关闭
 
 **使用说明：**
+
 1. 在 Cloudflare R2 中创建 S3 API Token（不是通用 API Token）
 2. 从 S3 API Token 中获取 Access Key ID 和 Secret Access Key
 3. 填写 `ACCESS_KEY_ID`、`SECRET_ACCESS_KEY`、`ENDPOINT` 和公开域名
@@ -138,6 +139,7 @@ EHENTAI_R2_ENABLED=false
   7. 若 stream 接口失败，自动回退到本地路径直传 `upload_group_file`
 
 **示例：**
+
 - `/download 标题`：下载 Resample 版本
 - `/download -original 标题`：下载原始质量版本
 
