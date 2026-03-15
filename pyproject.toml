@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-ehentai"
-version = "0.1.0"
+version = "0.0.1"
 description = "NoneBot2 plugin for searching and downloading galleries from E-Hentai"
 readme = "README.md"
 requires-python = ">=3.10"
