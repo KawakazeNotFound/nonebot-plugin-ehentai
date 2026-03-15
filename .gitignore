@@ -223,3 +223,6 @@ test_search_standalone.py
 examples/
 aidetest/
 .DS_Store
+a4_output.png
+.gitignore
+scripts/search_debug.py
