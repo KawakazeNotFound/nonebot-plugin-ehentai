@@ -7,8 +7,10 @@ import importlib
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
+from nonebot.log import logger
 
 from .search_logic import build_search_render_payload
 
@@ -21,20 +23,49 @@ _COVER_HEADERS = {
     "Referer": "https://e-hentai.org/",
 }
 
+_COVER_BASE_URL = "https://e-hentai.org/"
+_COVER_FETCH_CONCURRENCY = 2
+_COVER_FETCH_RETRY = 3
 
-async def _fetch_cover_as_data_uri(url: str, timeout: float = 10.0) -> str:
+
+def _normalize_cover_url(url: str) -> str:
+    if not url:
+        return ""
+    value = str(url).strip()
+    if not value:
+        return ""
+    if value.startswith("//"):
+        return f"https:{value}"
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    return urljoin(_COVER_BASE_URL, value)
+
+
+async def _fetch_cover_as_data_uri(
+    client: httpx.AsyncClient,
+    sem: asyncio.Semaphore,
+    url: str,
+    timeout: float = 15.0,
+) -> str:
     """下载封面图并返回 base64 data URI；失败时返回空字符串。"""
-    if not url or not url.startswith("http"):
+    normalized_url = _normalize_cover_url(url)
+    if not normalized_url:
         return ""
-    try:
-        async with httpx.AsyncClient(headers=_COVER_HEADERS, timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            content_type = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
-            b64 = base64.b64encode(resp.content).decode("ascii")
-            return f"data:{content_type};base64,{b64}"
-    except Exception:
-        return ""
+
+    async with sem:
+        for attempt in range(1, _COVER_FETCH_RETRY + 1):
+            try:
+                resp = await client.get(normalized_url, timeout=timeout)
+                resp.raise_for_status()
+                content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+                if not content_type.startswith("image/"):
+                    return ""
+                b64 = base64.b64encode(resp.content).decode("ascii")
+                return f"data:{content_type};base64,{b64}"
+            except Exception:
+                if attempt >= _COVER_FETCH_RETRY:
+                    return ""
+                await asyncio.sleep(0.25 * attempt)
 
 ITEM_BLOCK_RE = re.compile(r"<!-- \{\{#items\}\} -->(.*?)<!-- \{\{/items\}\} -->", re.S)
 PLACEHOLDER_RE = re.compile(r"\{\{([a-zA-Z0-9_]+)\}\}")
@@ -141,10 +172,28 @@ async def render_search_results_image(
     items = payload.get("items", [])
     if items:
         cover_urls = [item.get("cover_url", "") for item in items]
-        data_uris = await asyncio.gather(*(_fetch_cover_as_data_uri(u) for u in cover_urls))
+        sem = asyncio.Semaphore(_COVER_FETCH_CONCURRENCY)
+        async with httpx.AsyncClient(
+            headers=_COVER_HEADERS,
+            follow_redirects=True,
+            timeout=15.0,
+        ) as client:
+            data_uris = await asyncio.gather(
+                *(_fetch_cover_as_data_uri(client, sem, u) for u in cover_urls)
+            )
+
+        success_count = 0
         for item, data_uri in zip(items, data_uris):
             if data_uri:
                 item["cover_url"] = data_uri
+                success_count += 1
+
+        if success_count < len(items):
+            logger.warning(
+                "[搜索渲染] 封面内嵌完成 %d/%d，部分封面下载失败",
+                success_count,
+                len(items),
+            )
 
     template_text = template_path.read_text(encoding="utf-8")
     html_text = _render_template(template_text, payload)
