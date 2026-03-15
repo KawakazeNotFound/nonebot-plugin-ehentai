@@ -1063,19 +1063,7 @@ class EHentaiClient:
 
     async def resolve_archive_url(self, gallery_url: str, prefer_original: bool = False) -> Optional[str]:
         logger.info(f"[存档] 开始解析存档下载链接: {gallery_url}, prefer_original={prefer_original}")
-        if self.backend == "curl_cffi":
-            try:
-                logger.debug(f"[存档] 使用 curl_cffi 后端解析")
-                return await asyncio.to_thread(self._resolve_archive_url_sync, gallery_url)
-            except Exception as error:
-                logger.warning(f"[存档] curl_cffi 解析出错: {type(error).__name__}: {error}")
-                if self.http3 and self._is_quic_tls_error(error):
-                    logger.info(f"[存档] 检测到 QUIC/TLS 错误，自动降级到 HTTP/1.1")
-                    return await asyncio.to_thread(self._resolve_archive_url_sync, gallery_url, False)
-                if not self._should_fallback_to_httpx(error):
-                    logger.error(f"[存档] 错误不可恢复，抛出异常")
-                    raise
-                logger.info(f"[存档] 将使用 httpx 后端作为备选")
+        logger.debug(f"[存档] 下载链路固定使用 httpx")
 
         gid_token = self._extract_gid_token(gallery_url)
         if not gid_token:
@@ -1217,19 +1205,7 @@ class EHentaiClient:
                     logger.error(f"[下载] 删除文件失败: {e}")
                     # 继续尝试覆盖
         
-        if self.backend == "curl_cffi":
-            try:
-                logger.debug(f"[下载] 使用 curl_cffi 后端")
-                return await asyncio.to_thread(self._download_file_sync, url, save_path)
-            except Exception as error:
-                logger.warning(f"[下载] curl_cffi 下载出错: {type(error).__name__}: {error}")
-                if self.http3 and self._is_quic_tls_error(error):
-                    logger.info(f"[下载] 检测到 QUIC/TLS 错误，自动降级到 HTTP/1.1")
-                    return await asyncio.to_thread(self._download_file_sync, url, save_path, False)
-                if not self._should_fallback_to_httpx(error):
-                    logger.error(f"[下载] 错误不可恢复，抛出异常")
-                    raise
-                logger.info(f"[下载] 将使用 httpx 后端作为备选")
+        logger.debug(f"[下载] 下载链路固定使用 httpx")
 
         save_path.parent.mkdir(parents=True, exist_ok=True)
         logger.debug(f"[下载] 创建下载目录成功")
