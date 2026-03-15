@@ -353,8 +353,10 @@ class EHentaiClient:
             return None
         return match.group(1), match.group(2)
 
-    def _build_search_url(self, keyword: str, options: Optional[SearchOptions]) -> str:
+    def _build_search_url(self, keyword: str, options: Optional[SearchOptions], eh_page: int = 0) -> str:
         params: dict[str, str] = {"f_search": keyword}
+        if eh_page > 0:
+            params["page"] = str(eh_page)
         if options is None:
             return f"{self.base_url}/?{urlencode(params)}"
 
@@ -803,8 +805,9 @@ class EHentaiClient:
         limit: int,
         options: Optional[SearchOptions],
         http3: Optional[bool] = None,
+        eh_page: int = 0,
     ) -> list[GalleryResult]:
-        search_url = self._build_search_url(keyword, options)
+        search_url = self._build_search_url(keyword, options, eh_page)
         with self._curl_session(http3=http3) as session:
             resp = session.get(search_url, headers=self._headers_for_url(search_url))
             return self._search_from_response(resp, limit)
@@ -820,7 +823,7 @@ class EHentaiClient:
         return False
 
     async def search(
-        self, keyword: str, limit: int = 5, options: Optional[SearchOptions] = None
+        self, keyword: str, limit: int = 5, options: Optional[SearchOptions] = None, eh_page: int = 0
     ) -> list[GalleryResult]:
         logger.info(f"[搜索] 开始搜索: keyword='{keyword}', limit={limit}, backend={self.backend}")
         
@@ -829,7 +832,7 @@ class EHentaiClient:
         if self.backend == "curl_cffi":
             try:
                 logger.debug(f"[搜索] 使用 curl_cffi 后端搜索")
-                results = await asyncio.to_thread(self._search_sync, keyword, limit, options)
+                results = await asyncio.to_thread(self._search_sync, keyword, limit, options, None, eh_page)
                 await self._enrich_japanese_titles(results)
                 return results
             except Exception as error:
@@ -840,7 +843,7 @@ class EHentaiClient:
                     if self.http3 and self._is_quic_tls_error(error):
                         logger.info(f"[搜索] 检测到 QUIC/TLS 错误，自动降级到 HTTP/1.1")
                         results = await asyncio.to_thread(
-                            self._search_sync, keyword, limit, options, False
+                            self._search_sync, keyword, limit, options, False, eh_page
                         )
                         await self._enrich_japanese_titles(results)
                         return results
@@ -849,7 +852,7 @@ class EHentaiClient:
                         raise
                     logger.info(f"[搜索] 将使用 httpx 后端作为备选")
 
-        search_url = self._build_search_url(keyword, options)
+        search_url = self._build_search_url(keyword, options, eh_page)
         logger.debug(f"[搜索] 构建的搜索 URL: {search_url}")
 
         # 先尝试直连 IP 模式
@@ -908,6 +911,48 @@ class EHentaiClient:
         results = self._search_from_response(resp, limit)
         await self._enrich_japanese_titles(results)
         return results
+
+    async def search_paged(
+        self,
+        keyword: str,
+        bot_page: int = 1,
+        results_per_page: int = 3,
+        max_eh_pages: int = 3,
+        options: Optional[SearchOptions] = None,
+    ) -> tuple[list[GalleryResult], int]:
+        """分页搜索。bot_page 从 1 开始，每页显示 results_per_page 条。
+        
+        Returns: (当前页结果列表, 本次共抓取的条数)
+        最多抓取 max_eh_pages 个 e-hentai 搜索页（每页约 25 条）。
+        """
+        EH_PAGE_SIZE = 25
+        start = (bot_page - 1) * results_per_page
+        end = bot_page * results_per_page
+
+        # 第 1 页快速路径：只抓取需要的数量
+        if bot_page == 1:
+            results = await self.search(keyword, results_per_page, options, eh_page=0)
+            return results[:results_per_page], len(results)
+
+        # 计算需要几个 e-hentai 页面
+        from math import ceil as _ceil
+        eh_pages_needed = min(max_eh_pages, _ceil(end / EH_PAGE_SIZE))
+
+        all_results: list[GalleryResult] = []
+        seen: set[str] = set()
+
+        for eh_page_idx in range(eh_pages_needed):
+            if len(all_results) >= end:
+                break
+            page_results = await self.search(keyword, EH_PAGE_SIZE, options, eh_page=eh_page_idx)
+            for r in page_results:
+                if r.gid not in seen:
+                    seen.add(r.gid)
+                    all_results.append(r)
+            if len(page_results) < EH_PAGE_SIZE:
+                break  # e-hentai 已无更多结果
+
+        return all_results[start:end], len(all_results)
 
     async def _get_archive_page(self, client: httpx.AsyncClient, gid: str, token: str) -> str:
         archive_page_url = f"{self.base_url}/archiver.php?gid={gid}&token={token}"

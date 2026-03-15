@@ -41,6 +41,27 @@ async def execute_gallery_search(
     return results
 
 
+async def execute_gallery_search_paged(
+    client: EHentaiClient,
+    keyword: str,
+    bot_page: int,
+    results_per_page: int = 3,
+    max_eh_pages: int = 3,
+    options: Optional[SearchOptions] = None,
+) -> tuple[list[GalleryResult], int]:
+    """分页搜索。返回 (当前页结果, 本次共抓取条数)。"""
+    logger.info(
+        f"[搜索流程] 分页搜索: keyword='{keyword}', bot_page={bot_page}, "
+        f"results_per_page={results_per_page}, max_eh_pages={max_eh_pages}"
+    )
+    try:
+        return await client.search_paged(keyword, bot_page, results_per_page, max_eh_pages, options)
+    except Exception as error:
+        err_text = _safe_error_text(error)
+        logger.error(f"[搜索流程] 分页搜索失败: {type(error).__name__}: {err_text}")
+        raise SearchExecutionError(err_text) from error
+
+
 def pick_first_result(results: Sequence[GalleryResult]) -> Optional[GalleryResult]:
     if not results:
         return None
@@ -105,6 +126,8 @@ def format_search_results_message(
     keyword: str,
     results: Sequence[GalleryResult],
     display_limit: Optional[int] = None,
+    bot_page: int = 1,
+    total_fetched: int = 0,
 ) -> str:
     if not results:
         return "没有找到结果，或当前 Cookie 权限不足。"
@@ -114,9 +137,13 @@ def format_search_results_message(
     else:
         display_count = min(display_limit, len(results))
 
+    tf = total_fetched or len(results)
+    start_index = (bot_page - 1) * display_count + 1
+    end_index = start_index + len(results) - 1
+
     lines: list[str] = [
         f"关键词: {keyword}",
-        f"共找到 {len(results)} 条结果，展示前 {display_count} 条:",
+        f"第 {bot_page} 页，第 {start_index}-{end_index} 条 / 已抓取共 {tf} 条:",
         "",
     ]
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import re
 from math import ceil
 from pathlib import Path
 from uuid import uuid4
@@ -34,9 +35,11 @@ from .service import EHentaiClient, SearchOptions
 from .search_logic import (
     SearchExecutionError,
     execute_gallery_search,
+    execute_gallery_search_paged,
     format_search_results_message,
     pick_first_result,
 )
+from .search_render import SearchRenderError, render_search_results_image
 from .r2 import init_r2_manager, get_r2_manager
 from .d1 import init_d1_manager, get_d1_manager
 
@@ -198,40 +201,101 @@ async def send_message_with_retry(
                     raise RuntimeError(f"消息发送失败: {e.message}")
 
 
+async def send_image_with_retry(
+    cmd,
+    image_bytes: bytes,
+    max_retries: int = 3,
+    retry_delay: float = 1.0,
+) -> None:
+    """发送图片消息并重试，降低 NapCat 超时的影响。"""
+    for attempt in range(max_retries):
+        try:
+            await cmd.finish(Message(MessageSegment.image(image_bytes)))
+            return
+        except ActionFailed as e:
+            if attempt < max_retries - 1:
+                logger.warning(
+                    f"发送图片失败 (第 {attempt + 1} 次尝试)，{retry_delay}秒后重试: {e.retcode} {e.message}"
+                )
+                await asyncio.sleep(retry_delay)
+            else:
+                logger.error(f"发送图片失败（已重试 {max_retries} 次）: {e.message}")
+                raise RuntimeError(f"图片发送失败: {e.message}")
+
+
 search_cmd = on_command("search", priority=10, block=True)
 download_cmd = on_command("download", priority=10, block=True)
 
 
 @search_cmd.handle()
 async def handle_search(args: Message = CommandArg()) -> None:
-    keyword = args.extract_plain_text().strip()
-    logger.info(f"[搜索处理] 开始处理搜索请求: keyword='{keyword}'")
+    raw = args.extract_plain_text().strip()
+    logger.info(f"[搜索处理] 开始处理搜索请求: raw='{raw}'")
+
+    # 解析 --page N 参数
+    _RESULTS_PER_PAGE = 3
+    _MAX_EH_PAGES = 3
+
+    page_match = re.search(r'--page\s+(\d+)', raw)
+    bot_page = int(page_match.group(1)) if page_match else 1
+    if bot_page < 1:
+        bot_page = 1
+    keyword = re.sub(r'--page\s+\d+', '', raw).strip()
+
     if not keyword:
-        logger.warning(f"[搜索处理] 搜索无效")
-        await search_cmd.finish("用法: /search [Name]")
+        await search_cmd.finish("\u7528\u6cd5: /search <\u540d\u79f0> [--page N]")
+
+    logger.info(f"[搜索处理] keyword='{keyword}', bot_page={bot_page}")
 
     client = build_client()
     options = build_search_options()
-    logger.info(f"[搜索处理] 创建 EHentai 客户端")
     logger.debug(f"[搜索处理] backend={client.backend}, enable_direct_ip={client.enable_direct_ip}")
 
     try:
-        results = await execute_gallery_search(
+        page_results, total_fetched = await execute_gallery_search_paged(
             client,
             keyword,
-            plugin_config.ehentai_max_results,
+            bot_page,
+            _RESULTS_PER_PAGE,
+            _MAX_EH_PAGES,
             options,
         )
     except SearchExecutionError as error:
         await search_cmd.finish(f"搜索失败: {error}")
 
-    logger.info(f"[搜索处理] 搜索成功，找到 {len(results)} 个结果")
+    logger.info(f"[搜索处理] 分页搜索成功，当前页 {len(page_results)} 条，共抓取 {total_fetched} 条")
 
-    if not results:
-        await search_cmd.finish("没有找到结果，或当前 Cookie 权限不足。")
+    if not page_results:
+        if bot_page > 1:
+            await search_cmd.finish(f"第 {bot_page} 页没有更多结果了。")
+        else:
+            await search_cmd.finish("没有找到结果，或当前 Cookie 权限不足。")
 
-    message_text = format_search_results_message(keyword, results)
-    await send_message_with_retry(search_cmd, message_text)
+    # 发送 HTML 模板渲染后的整图；失败时回退到文本。
+    render_dir = Path(plugin_config.ehentai_download_dir) / "search_render"
+    try:
+        image_path = await render_search_results_image(
+            keyword=keyword,
+            results=page_results,
+            display_limit=_RESULTS_PER_PAGE,
+            bot_page=bot_page,
+            total_fetched=total_fetched,
+            output_dir=render_dir,
+        )
+        image_bytes = image_path.read_bytes()
+        await send_image_with_retry(search_cmd, image_bytes)
+    except SearchRenderError as error:
+        logger.warning(f"[搜索处理] 渲染搜索图失败，回退文本: {safe_exception_text(error)}")
+        message_text = format_search_results_message(
+            keyword, page_results, _RESULTS_PER_PAGE, bot_page=bot_page, total_fetched=total_fetched
+        )
+        await send_message_with_retry(search_cmd, message_text)
+    except Exception as error:
+        logger.warning(f"[搜索处理] 搜索渲染图发送失败，回退文本: {safe_exception_text(error)}")
+        message_text = format_search_results_message(
+            keyword, page_results, _RESULTS_PER_PAGE, bot_page=bot_page, total_fetched=total_fetched
+        )
+        await send_message_with_retry(search_cmd, message_text)
 
 
 def calculate_sha256(file_path: Path) -> str:
