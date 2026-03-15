@@ -220,3 +220,5 @@ Ehviewer/
 test_r2_config.py
 .gitignore
 test_search_standalone.py
+examples/
+aidetest/
