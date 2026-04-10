@@ -226,3 +226,4 @@ aidetest/
 a4_output.png
 .gitignore
 scripts/search_debug.py
+2Agent/
