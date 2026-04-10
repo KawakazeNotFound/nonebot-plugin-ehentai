@@ -57,6 +57,7 @@ class Config(BaseModel):
     ehentai_d1_database_id: str = ""
     ehentai_d1_api_token: str = "" # 需要有 D1 编辑权限的令牌
     ehentai_d1_enabled: bool = False
+    ehentai_d1_auto_cleanup_expired_metadata: bool = False  # 是否自动清理 D1 过期记录（默认关闭，保留下载历史）
 
     # 消息展现与清理配置
     ehentai_download_message_type: str = "single_bubble" # "single_bubble" 或 "forward"

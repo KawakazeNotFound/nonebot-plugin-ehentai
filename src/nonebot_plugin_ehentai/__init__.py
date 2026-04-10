@@ -593,8 +593,9 @@ async def handle_download(
                         r2_url=r2_url,
                         retention_hours=r2_manager.retention_hours
                     )
-                    # 顺便清理一下 D1 的过期记录
-                    await d1_manager.cleanup_expired_metadata()
+                    # 默认保留 D1 下载历史，仅在显式开启时清理过期记录
+                    if plugin_config.ehentai_d1_auto_cleanup_expired_metadata:
+                        await d1_manager.cleanup_expired_metadata()
 
                 # 标题安全清洗
                 safe_title = gallery.title.encode("utf-8", errors="ignore").decode("utf-8")
@@ -699,9 +700,9 @@ async def cleanup_task():
         except Exception: pass
     logger.info(f"[定时清理] 已删除 {count} 个本地缓存文件")
 
-    # 2. 清理 D1 过期元数据
+    # 2. 按需清理 D1 过期元数据（默认关闭，避免误删下载历史）
     d1_manager = get_d1_manager()
-    if d1_manager:
+    if d1_manager and plugin_config.ehentai_d1_auto_cleanup_expired_metadata:
         await d1_manager.cleanup_expired_metadata()
         logger.info("[定时清理] 已同步清理 D1 过期元数据")
 

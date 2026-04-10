@@ -68,6 +68,13 @@ EHENTAI_R2_PUBLIC_DOMAIN=https://pub-xxx.r2.dev
 EHENTAI_R2_MAX_TOTAL_SIZE_MB=3072
 EHENTAI_R2_FILE_RETENTION_HOURS=24
 EHENTAI_R2_ENABLED=false
+
+# Cloudflare D1 下载记录（可选）
+EHENTAI_D1_ACCOUNT_ID=
+EHENTAI_D1_DATABASE_ID=
+EHENTAI_D1_API_TOKEN=
+EHENTAI_D1_ENABLED=false
+EHENTAI_D1_AUTO_CLEANUP_EXPIRED_METADATA=false
 ```
 
 ### 配置说明
@@ -123,6 +130,16 @@ EHENTAI_R2_ENABLED=false
 4. 当群文件上传失败时，自动上传到 R2 并返回公开下载链接
 5. 链接在 24 小时后自动过期（可配置）
 6. 存储空间满时自动删除最早的文件
+
+### Cloudflare D1 下载记录配置
+
+可选将下载记录写入 Cloudflare D1。默认不会自动删除过期记录，避免 R2 清理时丢失下载历史。
+
+- `EHENTAI_D1_ACCOUNT_ID`：Cloudflare Account ID（留空时可尝试从 R2 Endpoint 自动提取）
+- `EHENTAI_D1_DATABASE_ID`：D1 Database ID
+- `EHENTAI_D1_API_TOKEN`：具备 D1 读写权限的 API Token
+- `EHENTAI_D1_ENABLED`：是否启用 D1 记录功能，默认关闭
+- `EHENTAI_D1_AUTO_CLEANUP_EXPIRED_METADATA`：是否自动清理 D1 过期记录，默认 `false`
 
 ## 指令
 
